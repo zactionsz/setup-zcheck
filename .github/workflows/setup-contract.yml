@@ -28,6 +28,9 @@ jobs:
       - name: Install development dependencies
         run: npm ci
 
+      - name: Audit dependency graph
+        run: npm audit --audit-level=high
+
       - name: Run complete local gate
         run: npm run check
 

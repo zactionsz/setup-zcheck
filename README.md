@@ -9,7 +9,7 @@ Pin both the Action and the platform archive:
 
 ```yaml
 - name: Set up zcheck
-  uses: zactionsz/setup-zcheck@7fd8dac2b7c057fd142e05079dee073e0f50700b
+  uses: zactionsz/setup-zcheck@88ca70422145efd6ab7f4262fb096ecd16372f57
   with:
     version: "0.0.2"
     sha256: "<platform archive digest>"
