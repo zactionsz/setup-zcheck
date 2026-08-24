@@ -76,6 +76,12 @@ jobs:
           version: "0.0.2"
           sha256: ${{ matrix.sha256 }}
 
+      - name: Set up Smoque
+        uses: zactionsz/setup-smoque@af5e0479c60a7c9957e0da2de8311f030c0f9871
+        with:
+          version: "0.1.2"
+          sha256: f6644336d7104c8099c42824a28dacdf402fcfe8b7a487fefc09b00b3b58d45d
+
       - name: Verify setup outputs
         shell: bash
         env:
@@ -89,8 +95,9 @@ jobs:
           test -f "$ZCHECK_PATH"
           zcheck --version
 
-      - name: Run consumer-owned validation
-        run: zcheck --root tests/fixtures/repository validate
+      - name: Run package-free consumer smoke
+        working-directory: integration/package-free
+        run: smoque run smoke/ --ci
 
   musl:
     name: x86_64-unknown-linux-musl
