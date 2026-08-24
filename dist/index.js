@@ -23,14 +23,13 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 
 // src/action.ts
-var import_node_crypto3 = require("node:crypto");
-var import_node_fs4 = require("node:fs");
-var import_promises4 = require("node:fs/promises");
+var import_node_crypto4 = require("node:crypto");
+var import_promises6 = require("node:fs/promises");
 var import_node_os2 = __toESM(require("node:os"));
-var import_node_path4 = __toESM(require("node:path"));
+var import_node_path5 = __toESM(require("node:path"));
 
 // src/archive.ts
-var import_promises = require("node:fs/promises");
+var import_promises2 = require("node:fs/promises");
 var import_node_path2 = __toESM(require("node:path"));
 
 // src/contracts.ts
@@ -93,10 +92,50 @@ function binaryName(target) {
 var import_node_child_process = require("node:child_process");
 var import_node_crypto = require("node:crypto");
 var import_node_fs = require("node:fs");
+var import_promises = require("node:fs/promises");
+var COMMAND_TIMEOUT_MS = 6e4;
+var MAX_BINARY_BYTES = 64 * 1024 * 1024;
 async function sha256File(file) {
+  const handle = await openStableRegularFile(file);
+  try {
+    const hash = (0, import_node_crypto.createHash)("sha256");
+    await readHandle(handle, (chunk) => {
+      hash.update(chunk);
+    });
+    return hash.digest("hex");
+  } finally {
+    await handle.close();
+  }
+}
+async function copyVerifiedFile(source, destination, expectedSha256, maxBytes) {
+  const sourceHandle = await openStableRegularFile(source);
   const hash = (0, import_node_crypto.createHash)("sha256");
-  for await (const chunk of (0, import_node_fs.createReadStream)(file)) hash.update(chunk);
-  return hash.digest("hex");
+  let received = 0;
+  let destinationCreated = false;
+  try {
+    const destinationHandle = await (0, import_promises.open)(destination, "wx", 384);
+    destinationCreated = true;
+    try {
+      await readHandle(sourceHandle, async (chunk) => {
+        received += chunk.length;
+        if (received > maxBytes) {
+          throw new Error(`File exceeds the ${maxBytes}-byte safety limit`);
+        }
+        hash.update(chunk);
+        await writeAll(destinationHandle, chunk);
+      });
+    } finally {
+      await destinationHandle.close();
+    }
+    const matches = hash.digest("hex") === expectedSha256;
+    if (!matches) await (0, import_promises.rm)(destination, { force: true });
+    return matches;
+  } catch (error) {
+    if (destinationCreated) await (0, import_promises.rm)(destination, { force: true });
+    throw error;
+  } finally {
+    await sourceHandle.close();
+  }
 }
 function verifyVersion(binaryPath, version, runCommand = run) {
   const result = runCommand(binaryPath, ["--version"]);
@@ -110,6 +149,7 @@ function run(command, args) {
   const result = (0, import_node_child_process.spawnSync)(command, args, {
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,
+    timeout: COMMAND_TIMEOUT_MS,
     windowsHide: true
   });
   if (result.error) {
@@ -121,21 +161,83 @@ function run(command, args) {
   }
   return { output };
 }
+function runBytes(command, args, maxBytes) {
+  const result = (0, import_node_child_process.spawnSync)(command, args, {
+    encoding: null,
+    maxBuffer: maxBytes,
+    timeout: COMMAND_TIMEOUT_MS,
+    windowsHide: true
+  });
+  if (result.error) {
+    if (result.error.code === "ENOBUFS") {
+      throw new Error(`Command output exceeds the ${maxBytes}-byte safety limit`);
+    }
+    throw new Error(`Unable to run ${command}: ${result.error.message}`);
+  }
+  const stdout = result.stdout ?? Buffer.alloc(0);
+  const stderr = result.stderr ?? Buffer.alloc(0);
+  if (stdout.length > maxBytes) {
+    throw new Error(`Command output exceeds the ${maxBytes}-byte safety limit`);
+  }
+  if (result.status !== 0) {
+    throw new Error(`${command} exited with status ${result.status}: ${stderr.toString().trim()}`);
+  }
+  return stdout;
+}
+async function openStableRegularFile(file) {
+  const before = await (0, import_promises.lstat)(file, { bigint: true });
+  if (!before.isFile() || before.isSymbolicLink()) {
+    throw new Error(`${file} is not a regular file`);
+  }
+  const handle = await (0, import_promises.open)(file, import_node_fs.constants.O_RDONLY | import_node_fs.constants.O_NOFOLLOW);
+  try {
+    const after = await handle.stat({ bigint: true });
+    if (!after.isFile() || before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size) {
+      throw new Error(`${file} changed while it was being opened`);
+    }
+    return handle;
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
+}
+async function readHandle(handle, consume) {
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  let position = 0;
+  while (true) {
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+    if (bytesRead === 0) return;
+    await consume(buffer.subarray(0, bytesRead));
+    position += bytesRead;
+  }
+}
+async function writeAll(handle, contents) {
+  let offset = 0;
+  while (offset < contents.length) {
+    const { bytesWritten } = await handle.write(contents, offset, contents.length - offset);
+    if (bytesWritten === 0) throw new Error("Unable to make progress while copying a file");
+    offset += bytesWritten;
+  }
+}
 
 // src/archive.ts
-async function extractBinary(archivePath, destination, target, runCommand = run) {
+async function extractBinary(archivePath, destination, target, runCommand = run, runBinaryCommand = runBytes, maxBinaryBytes = MAX_BINARY_BYTES) {
   const binary = binaryName(target);
   const compressed = archivePath.endsWith(".tar.gz");
   const listing = runCommand("tar", [compressed ? "-tzf" : "-tf", archivePath]).output;
   validateEntries(listing.split(/\r?\n/u).filter(Boolean), binary);
-  await (0, import_promises.mkdir)(destination, { recursive: true });
-  runCommand("tar", [compressed ? "-xzf" : "-xf", archivePath, "-C", destination, binary]);
+  await (0, import_promises2.mkdir)(destination, { recursive: true });
   const binaryPath = import_node_path2.default.join(destination, binary);
-  const metadata = await (0, import_promises.lstat)(binaryPath);
-  if (!metadata.isFile() || metadata.isSymbolicLink()) {
-    throw new Error(`Archive member ${binary} is not a regular file`);
+  const contents = runBinaryCommand(
+    "tar",
+    [compressed ? "-xOzf" : "-xOf", archivePath, binary],
+    maxBinaryBytes
+  );
+  if (contents.length > maxBinaryBytes) {
+    throw new Error(`Archive member ${binary} exceeds the ${maxBinaryBytes}-byte safety limit`);
   }
-  if (!target.endsWith("-windows-msvc")) await (0, import_promises.chmod)(binaryPath, 493);
+  await (0, import_promises2.writeFile)(binaryPath, contents, { flag: "wx", mode: 384 });
+  if (!target.endsWith("-windows-msvc")) await (0, import_promises2.chmod)(binaryPath, 493);
   return binaryPath;
 }
 function validateEntries(entries, binary) {
@@ -156,16 +258,21 @@ function validateEntries(entries, binary) {
   }
 }
 
+// src/cache.ts
+var import_node_crypto3 = require("node:crypto");
+var import_promises5 = require("node:fs/promises");
+var import_node_path4 = __toESM(require("node:path"));
+
 // src/download.ts
 var import_node_crypto2 = require("node:crypto");
 var import_node_fs2 = require("node:fs");
-var import_promises2 = require("node:fs/promises");
+var import_promises3 = require("node:fs/promises");
 var import_node_path3 = __toESM(require("node:path"));
 var import_node_stream = require("node:stream");
-var import_promises3 = require("node:stream/promises");
+var import_promises4 = require("node:stream/promises");
 var MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
 async function download(url, destination, fetchImpl = fetch) {
-  await (0, import_promises2.mkdir)(import_node_path3.default.dirname(destination), { recursive: true });
+  await (0, import_promises3.mkdir)(import_node_path3.default.dirname(destination), { recursive: true });
   const temporary = `${destination}.${(0, import_node_crypto2.randomUUID)()}.tmp`;
   try {
     const response = await fetchImpl(url, {
@@ -193,16 +300,159 @@ async function download(url, destination, fetchImpl = fetch) {
         callback(null, chunk);
       }
     });
-    await (0, import_promises3.pipeline)(
+    await (0, import_promises4.pipeline)(
       import_node_stream.Readable.fromWeb(response.body),
       limit,
       (0, import_node_fs2.createWriteStream)(temporary, { flags: "wx" })
     );
-    await (0, import_promises2.rename)(temporary, destination);
+    await (0, import_promises3.rename)(temporary, destination);
   } catch (error) {
-    await (0, import_promises2.rm)(temporary, { force: true });
+    await (0, import_promises3.rm)(temporary, { force: true });
     throw error;
   }
+}
+
+// src/cache.ts
+async function validCache(installDir, activationDir, version, target, archiveSha256, dependencies) {
+  const binaryPath = import_node_path4.default.join(installDir, binaryName(target));
+  const archivePath = import_node_path4.default.join(installDir, archiveName(version, target));
+  const validationRoot = `${activationDir}.validation`;
+  const privateArchive = import_node_path4.default.join(validationRoot, archiveName(version, target));
+  const extracted = import_node_path4.default.join(validationRoot, "extracted");
+  const privateBinary = import_node_path4.default.join(validationRoot, "cached", binaryName(target));
+  try {
+    await (0, import_promises5.mkdir)(import_node_path4.default.dirname(privateArchive), { recursive: true });
+    if (!await dependencies.copyVerifiedFile(
+      archivePath,
+      privateArchive,
+      archiveSha256,
+      MAX_ARCHIVE_BYTES
+    )) return false;
+    const candidate = await dependencies.extractBinary(privateArchive, extracted, target);
+    dependencies.verifyVersion(candidate, version);
+    const candidateSha256 = await dependencies.sha256File(candidate);
+    await (0, import_promises5.mkdir)(import_node_path4.default.dirname(privateBinary), { recursive: true });
+    if (!await dependencies.copyVerifiedFile(
+      binaryPath,
+      privateBinary,
+      candidateSha256,
+      MAX_BINARY_BYTES
+    )) return false;
+    if (!target.endsWith("-windows-msvc")) await (0, import_promises5.chmod)(privateBinary, 493);
+    dependencies.verifyVersion(privateBinary, version);
+    await (0, import_promises5.mkdir)(import_node_path4.default.dirname(activationDir), { recursive: true });
+    await (0, import_promises5.rename)(import_node_path4.default.dirname(privateBinary), activationDir);
+    return true;
+  } catch {
+    await (0, import_promises5.rm)(activationDir, { force: true, recursive: true });
+    return false;
+  } finally {
+    await (0, import_promises5.rm)(validationRoot, { force: true, recursive: true });
+  }
+}
+async function publishVerified(source, archive, installDir, version, target, archiveSha256, binarySha256, dependencies) {
+  await (0, import_promises5.mkdir)(import_node_path4.default.dirname(installDir), { recursive: true });
+  const publishDir = `${installDir}.${(0, import_node_crypto3.randomUUID)()}.tmp`;
+  const destination = import_node_path4.default.join(publishDir, binaryName(target));
+  const cachedArchive = import_node_path4.default.join(publishDir, archiveName(version, target));
+  try {
+    await (0, import_promises5.mkdir)(publishDir);
+    if (!await dependencies.copyVerifiedFile(
+      source,
+      destination,
+      binarySha256,
+      MAX_BINARY_BYTES
+    )) throw new Error("SHA-256 mismatch while staging the verified zcheck executable");
+    if (!await dependencies.copyVerifiedFile(
+      archive,
+      cachedArchive,
+      archiveSha256,
+      MAX_ARCHIVE_BYTES
+    )) throw new Error("SHA-256 mismatch while staging the verified zcheck archive");
+    if (!target.endsWith("-windows-msvc")) await (0, import_promises5.chmod)(destination, 493);
+    dependencies.verifyVersion(destination, version);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        await (0, import_promises5.rename)(publishDir, installDir);
+        return;
+      } catch (error) {
+        if (await cacheEntryMatches(
+          installDir,
+          publishDir,
+          version,
+          target,
+          archiveSha256,
+          binarySha256,
+          dependencies
+        )) return;
+        if (!isDestinationConflict(error)) throw error;
+        await replaceInvalidEntry(installDir);
+      }
+    }
+    throw new Error(`Unable to publish the verified zcheck cache entry at ${installDir}`);
+  } finally {
+    await (0, import_promises5.rm)(publishDir, { force: true, recursive: true });
+  }
+}
+async function activateVerified(source, activationDir, version, target, binarySha256, dependencies) {
+  const destination = import_node_path4.default.join(activationDir, binaryName(target));
+  try {
+    await (0, import_promises5.mkdir)(activationDir, { recursive: true });
+    if (!await dependencies.copyVerifiedFile(
+      source,
+      destination,
+      binarySha256,
+      MAX_BINARY_BYTES
+    )) throw new Error("SHA-256 mismatch while activating the verified zcheck executable");
+    if (!target.endsWith("-windows-msvc")) await (0, import_promises5.chmod)(destination, 493);
+    dependencies.verifyVersion(destination, version);
+  } catch (error) {
+    await (0, import_promises5.rm)(activationDir, { force: true, recursive: true });
+    throw error;
+  }
+}
+async function cacheEntryMatches(installDir, scratchRoot, version, target, archiveSha256, binarySha256, dependencies) {
+  const verificationRoot = import_node_path4.default.join(scratchRoot, `winner-${(0, import_node_crypto3.randomUUID)()}`);
+  const archiveCopy = import_node_path4.default.join(verificationRoot, archiveName(version, target));
+  const binaryCopy = import_node_path4.default.join(verificationRoot, binaryName(target));
+  try {
+    await (0, import_promises5.mkdir)(verificationRoot, { recursive: true });
+    const archiveMatches = await dependencies.copyVerifiedFile(
+      import_node_path4.default.join(installDir, archiveName(version, target)),
+      archiveCopy,
+      archiveSha256,
+      MAX_ARCHIVE_BYTES
+    );
+    const binaryMatches = await dependencies.copyVerifiedFile(
+      import_node_path4.default.join(installDir, binaryName(target)),
+      binaryCopy,
+      binarySha256,
+      MAX_BINARY_BYTES
+    );
+    if (!archiveMatches || !binaryMatches) return false;
+    if (!target.endsWith("-windows-msvc")) await (0, import_promises5.chmod)(binaryCopy, 493);
+    dependencies.verifyVersion(binaryCopy, version);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await (0, import_promises5.rm)(verificationRoot, { force: true, recursive: true });
+  }
+}
+async function replaceInvalidEntry(installDir) {
+  const invalidDir = `${installDir}.${(0, import_node_crypto3.randomUUID)()}.invalid`;
+  try {
+    await (0, import_promises5.rename)(installDir, invalidDir);
+    await (0, import_promises5.rm)(invalidDir, { force: true, recursive: true });
+  } catch (error) {
+    if (!isErrnoException(error) || error.code !== "ENOENT") throw error;
+  }
+}
+function isDestinationConflict(error) {
+  return isErrnoException(error) && (error.code === "EEXIST" || error.code === "ENOTEMPTY" || error.code === "EPERM");
+}
+function isErrnoException(error) {
+  return error instanceof Error && "code" in error;
 }
 
 // src/github.ts
@@ -247,6 +497,7 @@ function escapeWorkflowCommand(message) {
 // src/action.ts
 async function runAction(environment = process.env, overrides = {}) {
   const dependencies = {
+    copyVerifiedFile,
     download,
     extractBinary,
     resolveTarget,
@@ -260,10 +511,15 @@ async function runAction(environment = process.env, overrides = {}) {
   const toolCache = environment.RUNNER_TOOL_CACHE ?? environment.RUNNER_TEMP ?? import_node_os2.default.tmpdir();
   const runnerTemp = environment.RUNNER_TEMP ?? import_node_os2.default.tmpdir();
   const installDir = installDirectory(toolCache, version, target, expectedSha256);
-  const installedBinary = import_node_path4.default.join(installDir, binaryName(target));
+  const activationDir = import_node_path5.default.resolve(
+    runnerTemp,
+    "setup-zcheck-active",
+    `${version}-${target}-${expectedSha256}-${(0, import_node_crypto4.randomUUID)()}`
+  );
+  const installedBinary = import_node_path5.default.join(activationDir, binaryName(target));
   let cacheHit = await validCache(
     installDir,
-    runnerTemp,
+    activationDir,
     version,
     target,
     expectedSha256,
@@ -272,13 +528,13 @@ async function runAction(environment = process.env, overrides = {}) {
   if (cacheHit) {
     info(`Using verified cached zcheck ${version} for ${target}`);
   } else {
-    const stagingRoot = import_node_path4.default.resolve(
+    const stagingRoot = import_node_path5.default.resolve(
       runnerTemp,
       "setup-zcheck-staging",
-      `${version}-${target}-${(0, import_node_crypto3.randomUUID)()}`
+      `${version}-${target}-${(0, import_node_crypto4.randomUUID)()}`
     );
-    const archive = import_node_path4.default.join(stagingRoot, archiveName(version, target));
-    const extracted = import_node_path4.default.join(stagingRoot, "extracted");
+    const archive = import_node_path5.default.join(stagingRoot, archiveName(version, target));
+    const extracted = import_node_path5.default.join(stagingRoot, "extracted");
     try {
       const url = releaseUrl(version, target);
       info(`Downloading zcheck ${version} for ${target}`);
@@ -286,11 +542,12 @@ async function runAction(environment = process.env, overrides = {}) {
       const actualSha256 = await dependencies.sha256File(archive);
       if (actualSha256 !== expectedSha256) {
         throw new Error(
-          `SHA-256 mismatch for ${import_node_path4.default.basename(archive)}: expected ${expectedSha256}, received ${actualSha256}`
+          `SHA-256 mismatch for ${import_node_path5.default.basename(archive)}: expected ${expectedSha256}, received ${actualSha256}`
         );
       }
       const candidate = await dependencies.extractBinary(archive, extracted, target);
       dependencies.verifyVersion(candidate, version);
+      const candidateSha256 = await dependencies.sha256File(candidate);
       await publishVerified(
         candidate,
         archive,
@@ -298,14 +555,23 @@ async function runAction(environment = process.env, overrides = {}) {
         version,
         target,
         expectedSha256,
+        candidateSha256,
+        dependencies
+      );
+      await activateVerified(
+        candidate,
+        activationDir,
+        version,
+        target,
+        candidateSha256,
         dependencies
       );
     } finally {
-      await (0, import_promises4.rm)(stagingRoot, { force: true, recursive: true });
+      await (0, import_promises6.rm)(stagingRoot, { force: true, recursive: true });
     }
     cacheHit = false;
   }
-  addPath(installDir, environment);
+  addPath(activationDir, environment);
   setOutput("version", version, environment);
   setOutput("target", target, environment);
   setOutput("sha256", expectedSha256, environment);
@@ -313,69 +579,6 @@ async function runAction(environment = process.env, overrides = {}) {
   setOutput("cache-hit", String(cacheHit), environment);
   info(`Installed and verified zcheck ${version} for ${target}`);
   return { binaryPath: installedBinary, cacheHit, sha256: expectedSha256, target, version };
-}
-async function validCache(installDir, runnerTemp, version, target, archiveSha256, dependencies) {
-  const binaryPath = import_node_path4.default.join(installDir, binaryName(target));
-  const archivePath = import_node_path4.default.join(installDir, archiveName(version, target));
-  const validationRoot = import_node_path4.default.resolve(
-    runnerTemp,
-    "setup-zcheck-cache-validation",
-    `${version}-${target}-${(0, import_node_crypto3.randomUUID)()}`
-  );
-  try {
-    const [binaryMetadata, archiveMetadata] = await Promise.all([
-      (0, import_promises4.lstat)(binaryPath),
-      (0, import_promises4.lstat)(archivePath)
-    ]);
-    if (!binaryMetadata.isFile() || binaryMetadata.isSymbolicLink() || !archiveMetadata.isFile() || archiveMetadata.isSymbolicLink() || await dependencies.sha256File(archivePath) !== archiveSha256) {
-      return false;
-    }
-    const candidate = await dependencies.extractBinary(archivePath, validationRoot, target);
-    dependencies.verifyVersion(candidate, version);
-    const [candidateSha256, binarySha256] = await Promise.all([
-      dependencies.sha256File(candidate),
-      dependencies.sha256File(binaryPath)
-    ]);
-    if (candidateSha256 !== binarySha256) return false;
-    dependencies.verifyVersion(binaryPath, version);
-    return true;
-  } catch (error) {
-    if (isErrnoException(error) && error.code === "ENOENT") return false;
-    throw error;
-  } finally {
-    await (0, import_promises4.rm)(validationRoot, { force: true, recursive: true });
-  }
-}
-async function publishVerified(source, archive, installDir, version, target, archiveSha256, dependencies) {
-  await (0, import_promises4.mkdir)(import_node_path4.default.dirname(installDir), { recursive: true });
-  const publishDir = `${installDir}.${(0, import_node_crypto3.randomUUID)()}.tmp`;
-  const destination = import_node_path4.default.join(publishDir, binaryName(target));
-  const cachedArchive = import_node_path4.default.join(publishDir, archiveName(version, target));
-  try {
-    await (0, import_promises4.mkdir)(publishDir);
-    await (0, import_promises4.copyFile)(source, destination, import_node_fs4.constants.COPYFILE_EXCL);
-    await (0, import_promises4.copyFile)(archive, cachedArchive, import_node_fs4.constants.COPYFILE_EXCL);
-    if (!target.endsWith("-windows-msvc")) await (0, import_promises4.chmod)(destination, 493);
-    const [sourceSha256, destinationSha256, cachedArchiveSha256] = await Promise.all([
-      dependencies.sha256File(source),
-      dependencies.sha256File(destination),
-      dependencies.sha256File(cachedArchive)
-    ]);
-    if (sourceSha256 !== destinationSha256) {
-      throw new Error("SHA-256 mismatch while staging the verified zcheck executable");
-    }
-    if (cachedArchiveSha256 !== archiveSha256) {
-      throw new Error("SHA-256 mismatch while staging the verified zcheck archive");
-    }
-    dependencies.verifyVersion(destination, version);
-    await (0, import_promises4.rm)(installDir, { force: true, recursive: true });
-    await (0, import_promises4.rename)(publishDir, installDir);
-  } finally {
-    await (0, import_promises4.rm)(publishDir, { force: true, recursive: true });
-  }
-}
-function isErrnoException(error) {
-  return error instanceof Error && "code" in error;
 }
 
 // src/index.ts

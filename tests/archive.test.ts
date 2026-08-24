@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
-import { writeFileSync } from 'node:fs'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { extractBinary, validateEntries } from '../src/archive'
+import { runBytes } from '../src/tool'
 
 test('accepts the release layout and rejects unsafe entries', () => {
   assert.doesNotThrow(() => validateEntries(['zcheck', 'LICENSE', 'README.md'], 'zcheck'))
@@ -20,7 +20,7 @@ test('lists the archive and extracts only the expected binary', async (context) 
   context.after(() => rm(root, { force: true, recursive: true }))
   const archive = path.join(root, 'release.tar.gz')
   const destination = path.join(root, 'out')
-  const calls: Array<[string, string[]]> = []
+  const calls: Array<[string, string[], number?]> = []
 
   const binary = await extractBinary(
     archive,
@@ -28,13 +28,36 @@ test('lists the archive and extracts only the expected binary', async (context) 
     'x86_64-unknown-linux-gnu',
     (command, args) => {
       calls.push([command, args])
-      if (args[0] === '-tzf') return { output: 'zcheck\nLICENSE\nREADME.md\n' }
-      writeFileSync(path.join(destination, 'zcheck'), 'binary')
-      return { output: '' }
+      return { output: 'zcheck\nLICENSE\nREADME.md\n' }
+    },
+    (command, args, maxBytes) => {
+      calls.push([command, args, maxBytes])
+      return Buffer.from('binary')
     }
   )
 
   assert.equal(await readFile(binary, 'utf8'), 'binary')
   assert.deepEqual(calls[0], ['tar', ['-tzf', archive]])
-  assert.deepEqual(calls[1], ['tar', ['-xzf', archive, '-C', destination, 'zcheck']])
+  assert.deepEqual(calls[1]?.slice(0, 2), ['tar', ['-xOzf', archive, 'zcheck']])
+})
+
+test('rejects archive members and command output above the expanded-size limit', async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'setup-zcheck-archive-limit-'))
+  context.after(() => rm(root, { force: true, recursive: true }))
+
+  await assert.rejects(
+    extractBinary(
+      path.join(root, 'release.tar.gz'),
+      path.join(root, 'out'),
+      'x86_64-unknown-linux-gnu',
+      () => ({ output: 'zcheck\n' }),
+      () => Buffer.from('12345'),
+      4
+    ),
+    /4-byte safety limit/u
+  )
+  assert.throws(
+    () => runBytes(process.execPath, ['-e', 'process.stdout.write("12345")'], 4),
+    /4-byte safety limit/u
+  )
 })

@@ -5,8 +5,9 @@ import os from 'node:os'
 import path from 'node:path'
 import { test, type TestContext } from 'node:test'
 import { runAction } from '../src/action'
+import { publishVerified } from '../src/cache'
 import { installDirectory } from '../src/contracts'
-import { verifyVersion } from '../src/tool'
+import { copyVerifiedFile, sha256File, verifyVersion } from '../src/tool'
 
 const VERSION = '0.0.2'
 const TARGET = 'x86_64-unknown-linux-gnu' as const
@@ -42,12 +43,14 @@ test('installs a verified binary and only probes its version', async (context) =
   assert.equal(result.target, TARGET)
   assert.equal(result.cacheHit, false)
   assert.equal(await readFile(result.binaryPath, 'utf8'), 'zcheck binary')
-  assert.equal(versionProbes.length, 2)
+  assert.equal(versionProbes.length, 3)
   assert.deepEqual(
     versionProbes.map(({ version }) => version),
-    [VERSION, VERSION]
+    [VERSION, VERSION, VERSION]
   )
-  assert.match(await readFile(fixture.pathFile, 'utf8'), new RegExp(`${fixture.sha256}\\r?\\n$`, 'u'))
+  const exportedPath = await readFile(fixture.pathFile, 'utf8')
+  assert.match(exportedPath, /setup-zcheck-active/u)
+  assert.match(exportedPath, new RegExp(fixture.sha256, 'u'))
   assert.match(await readFile(fixture.outputFile, 'utf8'), /cache-hit=false/u)
 })
 
@@ -72,8 +75,52 @@ test('reuses a verified cache entry without downloading', async (context) => {
   })
 
   assert.equal(result.cacheHit, true)
-  assert.equal(result.binaryPath, binary)
+  assert.notEqual(result.binaryPath, binary)
+  assert.equal(await readFile(result.binaryPath, 'utf8'), 'cached binary')
+  assert.match(result.binaryPath, /setup-zcheck-active/u)
   assert.match(await readFile(fixture.outputFile, 'utf8'), /cache-hit=true/u)
+})
+
+test('publishes the same verified cache entry idempotently under concurrency', async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'setup-zcheck-publish-'))
+  context.after(() => rm(root, { force: true, recursive: true }))
+  const source = path.join(root, 'source', 'zcheck')
+  const archive = path.join(root, 'source', 'release.tar.gz')
+  const installDir = path.join(root, 'cache', 'entry')
+  await mkdir(path.dirname(source), { recursive: true })
+  await writeFile(source, 'verified binary')
+  await writeFile(archive, 'verified archive')
+  const binarySha256 = createHash('sha256').update('verified binary').digest('hex')
+  const archiveSha256 = createHash('sha256').update('verified archive').digest('hex')
+  const dependencies = {
+    copyVerifiedFile,
+    download: async () => undefined,
+    extractBinary: async () => source,
+    resolveTarget: () => TARGET,
+    sha256File,
+    verifyVersion: () => undefined
+  }
+
+  await Promise.all(
+    Array.from({ length: 8 }, () =>
+      publishVerified(
+        source,
+        archive,
+        installDir,
+        VERSION,
+        TARGET,
+        archiveSha256,
+        binarySha256,
+        dependencies
+      )
+    )
+  )
+
+  assert.equal(await readFile(path.join(installDir, 'zcheck'), 'utf8'), 'verified binary')
+  assert.equal(
+    await readFile(path.join(installDir, `zcheck-${VERSION}-${TARGET}.tar.gz`), 'utf8'),
+    'verified archive'
+  )
 })
 
 test('replaces a cache entry whose executable does not match the pinned archive', async (context) => {

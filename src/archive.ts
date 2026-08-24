@@ -1,13 +1,21 @@
-import { chmod, lstat, mkdir } from 'node:fs/promises'
+import { chmod, mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { binaryName, type Target } from './contracts'
-import { run, type RunCommand } from './tool'
+import {
+  MAX_BINARY_BYTES,
+  run,
+  runBytes,
+  type RunBinaryCommand,
+  type RunCommand
+} from './tool'
 
 export async function extractBinary(
   archivePath: string,
   destination: string,
   target: Target,
-  runCommand: RunCommand = run
+  runCommand: RunCommand = run,
+  runBinaryCommand: RunBinaryCommand = runBytes,
+  maxBinaryBytes: number = MAX_BINARY_BYTES
 ): Promise<string> {
   const binary = binaryName(target)
   const compressed = archivePath.endsWith('.tar.gz')
@@ -15,13 +23,16 @@ export async function extractBinary(
   validateEntries(listing.split(/\r?\n/u).filter(Boolean), binary)
 
   await mkdir(destination, { recursive: true })
-  runCommand('tar', [compressed ? '-xzf' : '-xf', archivePath, '-C', destination, binary])
-
   const binaryPath = path.join(destination, binary)
-  const metadata = await lstat(binaryPath)
-  if (!metadata.isFile() || metadata.isSymbolicLink()) {
-    throw new Error(`Archive member ${binary} is not a regular file`)
+  const contents = runBinaryCommand(
+    'tar',
+    [compressed ? '-xOzf' : '-xOf', archivePath, binary],
+    maxBinaryBytes
+  )
+  if (contents.length > maxBinaryBytes) {
+    throw new Error(`Archive member ${binary} exceeds the ${maxBinaryBytes}-byte safety limit`)
   }
+  await writeFile(binaryPath, contents, { flag: 'wx', mode: 0o600 })
   if (!target.endsWith('-windows-msvc')) await chmod(binaryPath, 0o755)
   return binaryPath
 }

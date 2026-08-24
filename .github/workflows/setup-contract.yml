@@ -66,14 +66,23 @@ jobs:
           version: "0.0.2"
           sha256: ${{ matrix.sha256 }}
 
+      - name: Set up zcheck from verified cache
+        id: zcheck-cache
+        uses: ./
+        with:
+          version: "0.0.2"
+          sha256: ${{ matrix.sha256 }}
+
       - name: Verify setup outputs
         shell: bash
         env:
           ACTUAL_TARGET: ${{ steps.zcheck.outputs.target }}
+          CACHE_HIT: ${{ steps.zcheck-cache.outputs.cache-hit }}
           EXPECTED_TARGET: ${{ matrix.target }}
-          ZCHECK_PATH: ${{ steps.zcheck.outputs.path }}
+          ZCHECK_PATH: ${{ steps.zcheck-cache.outputs.path }}
         run: |
           test "$ACTUAL_TARGET" = "$EXPECTED_TARGET"
+          test "$CACHE_HIT" = true
           test -f "$ZCHECK_PATH"
           zcheck --version
 
@@ -97,13 +106,22 @@ jobs:
           version: "0.0.2"
           sha256: bf4056916283a93651d2c0c69412337250041ce9c06a5a80661ff30d1e7b0a05
 
+      - name: Set up zcheck from verified cache
+        id: zcheck-cache
+        uses: ./
+        with:
+          version: "0.0.2"
+          sha256: bf4056916283a93651d2c0c69412337250041ce9c06a5a80661ff30d1e7b0a05
+
       - name: Verify setup outputs
         env:
           ACTUAL_TARGET: ${{ steps.zcheck.outputs.target }}
+          CACHE_HIT: ${{ steps.zcheck-cache.outputs.cache-hit }}
           EXPECTED_TARGET: x86_64-unknown-linux-musl
-          ZCHECK_PATH: ${{ steps.zcheck.outputs.path }}
+          ZCHECK_PATH: ${{ steps.zcheck-cache.outputs.path }}
         run: |
           test "$ACTUAL_TARGET" = "$EXPECTED_TARGET"
+          test "$CACHE_HIT" = true
           test -f "$ZCHECK_PATH"
           zcheck --version
 
@@ -140,9 +158,15 @@ jobs:
               export RUNNER_TEMP=/tmp/setup-zcheck/temp
               export RUNNER_TOOL_CACHE=/tmp/setup-zcheck/cache
               node dist/index.js
+              test "$(sed -n "s/^cache-hit=//p" "$GITHUB_OUTPUT")" = false
+              : > "$GITHUB_OUTPUT"
+              : > "$GITHUB_PATH"
+              node dist/index.js
               zcheck_path="$(sed -n "s/^path=//p" "$GITHUB_OUTPUT")"
               target="$(sed -n "s/^target=//p" "$GITHUB_OUTPUT")"
+              cache_hit="$(sed -n "s/^cache-hit=//p" "$GITHUB_OUTPUT")"
               test "$target" = aarch64-unknown-linux-musl
+              test "$cache_hit" = true
               test -f "$zcheck_path"
               "$zcheck_path" --version
               "$zcheck_path" --root tests/fixtures/repository validate

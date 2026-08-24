@@ -53,7 +53,7 @@ rejected.
 | `version` | Verified zcheck version |
 | `target` | Selected zcheck release target |
 | `sha256` | Verified lowercase archive digest |
-| `path` | Absolute path to the installed executable |
+| `path` | Absolute path to the job-private verified executable |
 | `cache-hit` | `true` when a verified tool-cache entry was reused |
 
 ## Verification
@@ -61,9 +61,11 @@ rejected.
 The Action selects one of the seven targets published by zcheck, downloads the
 versioned archive from its GitHub release, verifies the caller-pinned
 SHA-256 before extraction, rejects unsafe archive paths, extracts only the
-zcheck executable, and requires an exact `zcheck <version>` identity response.
-Only then does it publish the executable to the runner tool cache and add it to
-`PATH` for later steps.
+zcheck executable through a 64 MiB expanded-size limit, and requires an exact
+`zcheck <version>` identity response. Cache reads are copied from stable regular
+file handles into private staging, concurrent cache publication is idempotent,
+and later steps execute a job-private verified copy rather than a shared cache
+path.
 
 ## Development
 
