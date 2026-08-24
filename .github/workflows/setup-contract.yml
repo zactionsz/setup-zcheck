@@ -1,0 +1,149 @@
+name: Setup contract
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Unit and contract tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install development dependencies
+        run: npm ci
+
+      - name: Run complete local gate
+        run: npm run check
+
+  native:
+    name: ${{ matrix.target }}
+    needs: quality
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            sha256: a9e3ca964b6f5e86c693edeff4aeaddb46ee9d62f8713d3ded0bb6533b758e53
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            sha256: f5b296fa2c316f017bc8a189ac186c658ea1dc72b3311d7e0d3639d52d2608c7
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            sha256: 37c382c741999d8749318a52851695a55724371da5ad2f964daa318bf4fe3163
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            sha256: 973c5ad9a83590a664c69f62aac2e38b07bbcc8c1d887389507f80cf77347883
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            sha256: f4cc273e06cebdc9c830dd3c6b0dacbd0b1947db7ab2e3cf293e7740b2cd8e1c
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up zcheck
+        id: zcheck
+        uses: ./
+        with:
+          version: "0.0.2"
+          sha256: ${{ matrix.sha256 }}
+
+      - name: Verify setup outputs
+        shell: bash
+        env:
+          ACTUAL_TARGET: ${{ steps.zcheck.outputs.target }}
+          EXPECTED_TARGET: ${{ matrix.target }}
+          ZCHECK_PATH: ${{ steps.zcheck.outputs.path }}
+        run: |
+          test "$ACTUAL_TARGET" = "$EXPECTED_TARGET"
+          test -f "$ZCHECK_PATH"
+          zcheck --version
+
+      - name: Run consumer-owned validation
+        run: zcheck --root tests/fixtures/repository validate
+
+  musl:
+    name: x86_64-unknown-linux-musl
+    needs: quality
+    runs-on: ubuntu-24.04
+    container: alpine:3.22
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up zcheck
+        id: zcheck
+        uses: ./
+        with:
+          version: "0.0.2"
+          sha256: bf4056916283a93651d2c0c69412337250041ce9c06a5a80661ff30d1e7b0a05
+
+      - name: Verify setup outputs
+        env:
+          ACTUAL_TARGET: ${{ steps.zcheck.outputs.target }}
+          EXPECTED_TARGET: x86_64-unknown-linux-musl
+          ZCHECK_PATH: ${{ steps.zcheck.outputs.path }}
+        run: |
+          test "$ACTUAL_TARGET" = "$EXPECTED_TARGET"
+          test -f "$ZCHECK_PATH"
+          zcheck --version
+
+      - name: Run consumer-owned validation
+        run: zcheck --root tests/fixtures/repository validate
+
+  musl-arm64:
+    name: aarch64-unknown-linux-musl
+    needs: quality
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      # GitHub does not support JavaScript Actions in Alpine containers on ARM64.
+      # Exercise the same bundled Node 24 entrypoint in a native ARM64 musl container.
+      - name: Run setup contract in ARM64 musl
+        env:
+          INPUT_SHA256: 774b5dbeff398af7a29bff7d5cd7dd482a02bac8446a5696790a46d57df5bc27
+          INPUT_VERSION: "0.0.2"
+        run: |
+          docker run --rm \
+            --env INPUT_SHA256 \
+            --env INPUT_VERSION \
+            --volume "$PWD:/work:ro" \
+            --workdir /work \
+            node:24-alpine3.22 sh -euc '
+              mkdir -p /tmp/setup-zcheck
+              : > /tmp/setup-zcheck/output
+              : > /tmp/setup-zcheck/path
+              export GITHUB_OUTPUT=/tmp/setup-zcheck/output
+              export GITHUB_PATH=/tmp/setup-zcheck/path
+              export RUNNER_TEMP=/tmp/setup-zcheck/temp
+              export RUNNER_TOOL_CACHE=/tmp/setup-zcheck/cache
+              node dist/index.js
+              zcheck_path="$(sed -n "s/^path=//p" "$GITHUB_OUTPUT")"
+              target="$(sed -n "s/^target=//p" "$GITHUB_OUTPUT")"
+              test "$target" = aarch64-unknown-linux-musl
+              test -f "$zcheck_path"
+              "$zcheck_path" --version
+              "$zcheck_path" --root tests/fixtures/repository validate
+            '

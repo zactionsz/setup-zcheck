@@ -1,0 +1,31 @@
+name: Set up zcheck
+description: Install an exact, SHA-256-pinned zcheck release
+author: zsumz
+
+inputs:
+  version:
+    description: Exact zcheck release version
+    required: true
+  sha256:
+    description: Expected SHA-256 digest of the archive for this runner
+    required: true
+
+outputs:
+  version:
+    description: Verified zcheck version
+  target:
+    description: Selected zcheck release target
+  sha256:
+    description: Verified lowercase archive SHA-256 digest
+  path:
+    description: Absolute path to the installed zcheck executable
+  cache-hit:
+    description: Whether an existing verified tool-cache entry was used
+
+runs:
+  using: node24
+  main: dist/index.js
+
+branding:
+  icon: shield
+  color: gray-dark

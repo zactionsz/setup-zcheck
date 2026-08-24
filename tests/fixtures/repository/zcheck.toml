@@ -1,0 +1,10 @@
+schema = 1
+default = "check"
+
+[execution]
+repository_state = "ignore"
+
+[tasks.check]
+description = "Validate the setup Action fixture."
+run = ["node", "--version"]
+tools = ["node"]
