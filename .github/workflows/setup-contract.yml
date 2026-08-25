@@ -17,7 +17,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check out repository
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node.js
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
@@ -60,7 +60,7 @@ jobs:
             sha256: f4cc273e06cebdc9c830dd3c6b0dacbd0b1947db7ab2e3cf293e7740b2cd8e1c
     steps:
       - name: Check out repository
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up zcheck
         id: zcheck
@@ -107,7 +107,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check out repository
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up zcheck
         id: zcheck
@@ -145,7 +145,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check out repository
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # GitHub does not support JavaScript Actions in Alpine containers on ARM64.
       # Exercise the same bundled Node 24 entrypoint in a native ARM64 musl container.
